@@ -1,4 +1,4 @@
-module istio.io/tools
+module github.com/thetreep/istio-tools
 
 go 1.21
 
