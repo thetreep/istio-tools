@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -68,7 +69,10 @@ func getLicenses() ([]*moduleInfo, error) {
 	for _, m := range mods {
 
 		if m.Dir == "" {
-			return nil, fmt.Errorf("couldn't find content of module %s (did you forget to do `go mod download`?)", m.Path)
+			return nil, fmt.Errorf(
+				"couldn't find content of module %s (did you forget to do `go mod download`?)",
+				m.Path,
+			)
 		}
 
 		// find all the license files contained in the module
@@ -103,16 +107,20 @@ func getLicenses() ([]*moduleInfo, error) {
 
 			mi.licenses = append(mi.licenses, &li)
 		}
-		sort.Slice(mi.licenses, func(i, j int) bool {
-			return strings.Compare(mi.licenses[i].path, mi.licenses[j].path) < 0
-		})
+		sort.Slice(
+			mi.licenses, func(i, j int) bool {
+				return strings.Compare(mi.licenses[i].path, mi.licenses[j].path) < 0
+			},
+		)
 
 		result = append(result, mi)
 	}
 
-	sort.Slice(result, func(i, j int) bool {
-		return strings.Compare(result[i].moduleName, result[j].moduleName) < 0
-	})
+	sort.Slice(
+		result, func(i, j int) bool {
+			return strings.Compare(result[i].moduleName, result[j].moduleName) < 0
+		},
+	)
 
 	return result, nil
 }
@@ -153,6 +161,13 @@ func getDependentModules() ([]moduleDepInfo, error) {
 	result := map[string]moduleDepInfo{}
 	for _, m := range modules {
 		if m.Module != nil && !m.Module.Main {
+			if m.Module.Dir == "" {
+				vendorPath := path.Join("vendor/", m.Module.Path)
+				_, err := os.Stat(vendorPath)
+				if err == nil {
+					m.Module.Dir = vendorPath
+				}
+			}
 			result[m.Module.Path] = *m.Module
 		}
 	}
@@ -180,30 +195,35 @@ var supportedLicenseFilenames = map[string]struct{}{
 // find all license files in the given directory tree
 func findLicenseFiles(basepath string) ([]string, error) {
 	var result []string
-	err := filepath.Walk(basepath, func(path string, info os.FileInfo, err error) error {
-		if info == nil {
-			return fmt.Errorf("unable to get information on %s: %v", path, err)
-		}
+	err := filepath.Walk(
+		basepath, func(path string, info os.FileInfo, err error) error {
+			if info == nil {
+				return fmt.Errorf("unable to get information on %s: %v", path, err)
+			}
 
-		if info.IsDir() {
-			// Filter out folders that are dumps of all dependencies' licenses; we will find the original license ourselves.
-			// This avoids 1000s of duplicates.
-			// licenses: Istio naming
-			// VENDOR-LICENSE: knative naming
-			isTekton := strings.Contains(path, "github.com/tektoncd/pipeline") && filepath.Base(path) == "third_party"
-			if path == filepath.Join(basepath, "licenses") || filepath.Base(path) == "VENDOR-LICENSE" || isTekton {
-				//  don't recurse into this since it holds upstream licenses
-				return filepath.SkipDir
+			if info.IsDir() {
+				// Filter out folders that are dumps of all dependencies' licenses; we will find the original license ourselves.
+				// This avoids 1000s of duplicates.
+				// licenses: Istio naming
+				// VENDOR-LICENSE: knative naming
+				isTekton := strings.Contains(
+					path,
+					"github.com/tektoncd/pipeline",
+				) && filepath.Base(path) == "third_party"
+				if path == filepath.Join(basepath, "licenses") || filepath.Base(path) == "VENDOR-LICENSE" || isTekton {
+					//  don't recurse into this since it holds upstream licenses
+					return filepath.SkipDir
+				}
+			} else {
+				name := strings.ToUpper(info.Name())
+				if _, ok := supportedLicenseFilenames[name]; ok {
+					result = append(result, path)
+					return nil
+				}
 			}
-		} else {
-			name := strings.ToUpper(info.Name())
-			if _, ok := supportedLicenseFilenames[name]; ok {
-				result = append(result, path)
-				return nil
-			}
-		}
-		return nil
-	})
+			return nil
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
