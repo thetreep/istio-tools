@@ -118,7 +118,7 @@ func getLicenses() ([]*moduleInfo, error) {
 }
 
 func getDependentModules() ([]moduleDepInfo, error) {
-	cmd := exec.Command("go", "list", "-mod=readonly", "-deps", "-test", "-json", "./...")
+	cmd := exec.Command("go", "list", "-deps", "-test", "-json", "./...")
 
 	// Turn on Go module support
 	cmd.Env = os.Environ()
