@@ -40,9 +40,15 @@ def plotter(args):
     plt.figure(figsize=(1138 / dpi, 871 / dpi), dpi=dpi)
     fig = plt.figure(figsize=(1138 / dpi, 871 / dpi), dpi=dpi)
     ax = fig.add_subplot(111)
-    ax.set_ylim(0, 1.5)
+    ax.set_ylim(0, 1.0)
     for key, val in telemetry_modes_y_data.items():
-        plt.plot(args.query_list, val, marker='o', label=key)
+        plot_key = key
+        match key:
+            case "no_istio_mtls_no_istio":
+                plot_key = "no_istio"
+            case "istio_with_stats_both":
+                plot_key = "istio_with_stats"
+        plt.plot(args.query_list, val, marker='o', label=plot_key)
         for i, j in zip(args.query_list, val):
             ax.annotate(str(j), xy=(i, j))
             print("i=%x,j=%x,args.querylist=%x,val=%x,key=%x", i, j, args.query_list, val, key)
@@ -155,7 +161,7 @@ def get_parser():
     parser.add_argument(
         "--telemetry_modes",
         help="This is a list of perf test labels, currently it can be any combinations from the follow supported modes:"
-             "[none_mtls_baseline, none_mtls_both, v2-sd-full-nullvm_both, v2-stats-nullvm_both, "
+             "[no_istio, none_mtls_both, v2-sd-full-nullvm_both, istio_with_stats, "
              "v2-stats-wasm_both, v2-sd-nologging-nullvm_both].",
         type=string_list
     )

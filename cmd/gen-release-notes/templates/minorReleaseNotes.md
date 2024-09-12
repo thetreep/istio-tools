@@ -14,11 +14,9 @@ aliases:
 This is an automatically generated rough draft of the release notes and has not yet been reviewed.
 {{< /warning >}}
 
-# Release Notes
-
 ## Deprecation Notices
 
-These notices describe functionality that will be removed in a future release according to [Istio's deprecation policy](/about/feature-stages/#feature-phase-definitions). Please consider upgrading your environment to remove the deprecated functionality.
+These notices describe functionality that will be removed in a future release according to [Istio's deprecation policy](/docs/releases/feature-stages/#feature-phase-definition). Please consider upgrading your environment to remove the deprecated functionality.
 
 <!-- releaseNotes action:Deprecated -->
 

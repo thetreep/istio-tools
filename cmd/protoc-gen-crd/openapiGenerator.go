@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"slices"
 	"strings"
 
@@ -33,6 +34,7 @@ import (
 	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/controller-tools/pkg/crd"
 	crdmarkers "sigs.k8s.io/controller-tools/pkg/crd/markers"
 	"sigs.k8s.io/controller-tools/pkg/markers"
 	"sigs.k8s.io/yaml"
@@ -68,38 +70,45 @@ var specialTypes = map[string]*apiext.JSONSchemaProps{
 	},
 	"google.protobuf.DoubleValue": {
 		Type:     "number",
+		Format:   "double",
 		Nullable: true,
 	},
 	"google.protobuf.Int32Value": {
 		Type:     "integer",
+		Format:   "int32",
 		Nullable: true,
-		// Min: math.MinInt32,
-		// Max: math.MaxInt32,
 	},
 	"google.protobuf.Int64Value": {
 		Type:     "integer",
+		Format:   "int64",
 		Nullable: true,
-		// Min: math.MinInt64,
-		// Max: math.MaxInt64,
 	},
 	"google.protobuf.UInt32Value": {
 		Type:     "integer",
+		Minimum:  Ptr(float64(0)),
+		Maximum:  Ptr(float64(math.MaxUint32)),
 		Nullable: true,
-		// Min: 0,
-		// Max: math.MaxUInt32,
 	},
 	"google.protobuf.UInt64Value": {
-		Type:     "integer",
+		Type:    "integer",
+		Minimum: Ptr(float64(0)),
+		// TODO: this overflows Kubernetes
+		// schema.Maximum = Ptr(float64(uint64(math.MaxUint64)))
 		Nullable: true,
-		// Min: 0,
-		// Max: math.MaxUInt62,
 	},
 	"google.protobuf.FloatValue": {
 		Type:     "number",
+		Format:   "double",
 		Nullable: true,
 	},
 	"google.protobuf.Duration": {
 		Type: "string",
+		XValidations: []apiext.ValidationRule{
+			{
+				Rule:    "duration(self) >= duration('1ms')",
+				Message: "must be a valid duration greater than 1ms",
+			},
+		},
 	},
 	"google.protobuf.Empty": {
 		Type:          "object",
@@ -302,7 +311,23 @@ func (g *openapiGenerator) generateFile(
 	for name, cfg := range genTags {
 		log.Println("Generating", name)
 		group := cfg["groupName"]
-		version := cfg["version"]
+
+		versionsString := cfg["versions"]
+		versions := strings.Split(versionsString, ",")
+		var storageVersion string
+		if version := cfg["version"]; version != "" {
+			if len(versions) == 0 {
+				log.Fatal("can only set versions or version")
+			}
+			if _, f := cfg["storageVersion"]; f {
+				// Old way: single version specifies explicitly
+				storageVersion = version
+			}
+			versions = []string{version}
+		} else {
+			// New way: first one is the storage version
+			storageVersion = versions[0]
+		}
 		kind := name[strings.LastIndex(name, ".")+1:]
 		singular := strings.ToLower(kind)
 		plural := singular + "s"
@@ -321,13 +346,6 @@ func (g *openapiGenerator) generateFile(
 			ListKind: kind + "List",
 			Plural:   plural,
 			Singular: singular,
-		}
-		ver := apiext.CustomResourceDefinitionVersion{
-			Name:   version,
-			Served: true,
-			Schema: &apiext.CustomResourceValidation{
-				OpenAPIV3Schema: schema,
-			},
 		}
 
 		if res, f := cfg["resource"]; f {
@@ -349,78 +367,110 @@ func (g *openapiGenerator) generateFile(
 			}
 		}
 		name := names.Plural + "." + group
-		if pk, f := cfg["printerColumn"]; f {
-			pcs := strings.Split(pk, ";;")
-			for _, pc := range pcs {
-				if pc == "" {
-					continue
-				}
-				column := apiext.CustomResourceColumnDefinition{}
-				for n, m := range extractKeyValue(pc) {
-					switch n {
-					case "name":
-						column.Name = m
-					case "type":
-						column.Type = m
-					case "description":
-						column.Description = m
-					case "JSONPath":
-						column.JSONPath = m
+		for _, version := range versions {
+			ver := apiext.CustomResourceDefinitionVersion{
+				Name:   version,
+				Served: true,
+				Schema: &apiext.CustomResourceValidation{
+					OpenAPIV3Schema: schema,
+				},
+			}
+			if pk, f := cfg["printerColumn"]; f {
+				pcs := strings.Split(pk, ";;")
+				for _, pc := range pcs {
+					if pc == "" {
+						continue
 					}
+					column := apiext.CustomResourceColumnDefinition{}
+					for n, m := range extractKeyValue(pc) {
+						switch n {
+						case "name":
+							column.Name = m
+						case "type":
+							column.Type = m
+						case "description":
+							column.Description = m
+						case "JSONPath":
+							column.JSONPath = m
+						}
+					}
+					ver.AdditionalPrinterColumns = append(ver.AdditionalPrinterColumns, column)
 				}
-				ver.AdditionalPrinterColumns = append(ver.AdditionalPrinterColumns, column)
 			}
-		}
-		if sr, f := cfg["subresource"]; f {
-			if sr == "status" {
-				ver.Subresources = &apiext.CustomResourceSubresources{Status: &apiext.CustomResourceSubresourceStatus{}}
-				ver.Schema.OpenAPIV3Schema.Properties["status"] = apiext.JSONSchemaProps{
-					Type:                   "object",
-					XPreserveUnknownFields: Ptr(true),
+			if sr, f := cfg["subresource"]; f {
+				k, v, ok := strings.Cut(sr, "=")
+				if !ok {
+					k = sr
+				}
+				if k == "status" {
+					if v == "" {
+						// Back compat
+						v = "istio.meta.v1alpha1.IstioStatus"
+					}
+					ver.Subresources = &apiext.CustomResourceSubresources{Status: &apiext.CustomResourceSubresourceStatus{}}
+					status, f := allSchemas[v]
+					if !f {
+						log.Fatalf("Schema %v not found", v)
+					}
+					// Because status can be written by arbitrary third party controllers, allow unknown fields.
+					// These really should be using `conditions`, which is an unstructured list, but they may not be.
+					// For backwards compat, we make this allow unknown fields.
+					schema := *status.DeepCopy()
+					alwaysTrue := true
+					schema.XPreserveUnknownFields = &alwaysTrue
+					ver.Schema.OpenAPIV3Schema.Properties["status"] = schema
 				}
 			}
-		}
-		if sr, f := cfg["spec"]; f {
-			if sr == "required" {
-				ver.Schema.OpenAPIV3Schema.Required = append(ver.Schema.OpenAPIV3Schema.Required, "spec")
+			if sr, f := cfg["spec"]; f {
+				if sr == "required" {
+					ver.Schema.OpenAPIV3Schema.Required = append(ver.Schema.OpenAPIV3Schema.Required, "spec")
+				}
 			}
-		}
-		if _, f := cfg["storageVersion"]; f {
-			ver.Storage = true
-		}
-		if err := validateStructural(ver.Schema.OpenAPIV3Schema); err != nil {
-			log.Fatalf("failed to validate %v as structural: %v", kind, err)
-		}
+			if version == storageVersion {
+				ver.Storage = true
+			}
+			if r, f := cfg["deprecationReplacement"]; f {
+				msg := fmt.Sprintf("%v version %q is deprecated, use %q", name, ver.Name, r)
+				ver.Deprecated = true
+				ver.DeprecationWarning = &msg
+			}
+			if err := validateStructural(ver.Schema.OpenAPIV3Schema); err != nil {
+				log.Fatalf("failed to validate %v as structural: %v", kind, err)
+			}
 
-		crd, f := crds[name]
-		if !f {
-			crd = &apiext.CustomResourceDefinition{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: "apiextensions.k8s.io/v1",
-					Kind:       "CustomResourceDefinition",
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: extractKeyValue(cfg["annotations"]),
-					Labels:      extractKeyValue(cfg["labels"]),
-					Name:        name,
-				},
-				Spec: apiext.CustomResourceDefinitionSpec{
-					Group: group,
-					Names: names,
-					Scope: apiext.NamespaceScoped,
-				},
-				Status: apiext.CustomResourceDefinitionStatus{},
+			crd, f := crds[name]
+			if !f {
+				crd = &apiext.CustomResourceDefinition{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "apiextensions.k8s.io/v1",
+						Kind:       "CustomResourceDefinition",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: extractKeyValue(cfg["annotations"]),
+						Labels:      extractKeyValue(cfg["labels"]),
+						Name:        name,
+					},
+					Spec: apiext.CustomResourceDefinitionSpec{
+						Group: group,
+						Names: names,
+						Scope: apiext.NamespaceScoped,
+					},
+					Status: apiext.CustomResourceDefinitionStatus{},
+				}
 			}
-		}
 
-		crd.Spec.Versions = append(crd.Spec.Versions, ver)
-		crds[name] = crd
-		slices.SortFunc(crd.Spec.Versions, func(a, b apiext.CustomResourceDefinitionVersion) int {
-			if a.Name < b.Name {
-				return -1
-			}
-			return 1
-		})
+			crd.Spec.Versions = append(crd.Spec.Versions, ver)
+			crds[name] = crd
+			slices.SortFunc(crd.Spec.Versions, func(a, b apiext.CustomResourceDefinitionVersion) int {
+				if a.Name == b.Name {
+					log.Fatalf("%v has the version %v twice", name, a.Name)
+				}
+				if a.Name < b.Name {
+					return -1
+				}
+				return 1
+			})
+		}
 	}
 
 	// sort the configs so that the order is deterministic.
@@ -707,19 +757,26 @@ func (g *openapiGenerator) fieldType(field *protomodel.FieldDescriptor) *apiext.
 
 	case descriptor.FieldDescriptorProto_TYPE_INT64, descriptor.FieldDescriptorProto_TYPE_SINT64, descriptor.FieldDescriptorProto_TYPE_SFIXED64:
 		schema.Type = "integer"
-		// TODO:
-		// schema.Format = "int64"
+		schema.Format = "int64"
+		// TODO: ideally we could use a string here to avoid https://github.com/istio/api/issues/2818
+		// however, IntOrString is an int32.
 		// schema.XIntOrString = true
 		schema.Description = g.generateDescription(field)
 
 	case descriptor.FieldDescriptorProto_TYPE_UINT64, descriptor.FieldDescriptorProto_TYPE_FIXED64:
 		schema.Type = "integer"
-		// TODO: schema.Format = "int64" schema.XIntOrString = true
+		schema.Minimum = Ptr(float64(0))
+		// TODO: this overflows Kubernetes
+		// schema.Maximum = Ptr(float64(uint64(math.MaxUint64)))
+		// TODO: ideally we could use a string here to avoid https://github.com/istio/api/issues/2818
+		// however, IntOrString is an int32.
+		// schema.XIntOrString = true
 		schema.Description = g.generateDescription(field)
 
 	case descriptor.FieldDescriptorProto_TYPE_UINT32, descriptor.FieldDescriptorProto_TYPE_FIXED32:
 		schema.Type = "integer"
-		// TODO: schema.Format = "int32"
+		schema.Minimum = Ptr(float64(0))
+		schema.Maximum = Ptr(float64(math.MaxUint32))
 		schema.Description = g.generateDescription(field)
 
 	case descriptor.FieldDescriptorProto_TYPE_BOOL:
@@ -733,7 +790,8 @@ func (g *openapiGenerator) fieldType(field *protomodel.FieldDescriptor) *apiext.
 	case descriptor.FieldDescriptorProto_TYPE_MESSAGE:
 		msg := field.FieldType.(*protomodel.MessageDescriptor)
 		if customSchema, ok := g.customSchemasByMessageName[g.absoluteName(msg)]; ok {
-			schema = g.generateCustomMessageSchema(msg, customSchema)
+			// Deep copy since it is a shared type we may modify later
+			schema = g.generateCustomMessageSchema(msg, customSchema.DeepCopy())
 		} else if msg.GetOptions().GetMapEntry() {
 			isMap = true
 			sr := g.fieldType(msg.Fields[1])
@@ -756,7 +814,21 @@ func (g *openapiGenerator) fieldType(field *protomodel.FieldDescriptor) *apiext.
 	case descriptor.FieldDescriptorProto_TYPE_ENUM:
 		enum := field.FieldType.(*protomodel.EnumDescriptor)
 		schema = g.generateEnumSchema(enum)
-		schema.Description = g.generateDescription(field)
+		desc := g.generateDescription(field)
+		// Add all options to the description
+		valid := []string{}
+		for i, v := range enum.Values {
+			n := v.GetName()
+			// Allow skipping the default value if its a bogus value.
+			if i == 0 && (strings.Contains(n, "UNSPECIFIED") ||
+				strings.Contains(n, "UNSET") ||
+				strings.Contains(n, "UNDEFINED") ||
+				strings.Contains(n, "INVALID")) {
+				continue
+			}
+			valid = append(valid, n)
+		}
+		schema.Description = desc + fmt.Sprintf("\n\nValid Options: %v", strings.Join(valid, ", "))
 	}
 
 	if field.IsRepeated() && !isMap {
@@ -778,10 +850,60 @@ type SchemaApplier interface {
 	ApplyToSchema(schema *apiext.JSONSchemaProps) error
 }
 
+const (
+	KubeBuilderValidationPrefix = "+kubebuilder:validation:"
+	ProtocGenValidationPrefix   = "+protoc-gen-crd:"
+	MapValidationPrefix         = "+protoc-gen-crd:map-value-validation:"
+	ListValidationPrefix        = "+protoc-gen-crd:list-value-validation:"
+	DurationValidationPrefix    = "+protoc-gen-crd:duration-validation:"
+	IntOrStringValidation       = "+protoc-gen-crd:validation:XIntOrString"
+	// IgnoreSubValidation is a custom validation allowing to refer to a type, but remove some validation
+	// This is useful when we are embedding a different type in a different context.
+	IgnoreSubValidation = "+protoc-gen-crd:validation:IgnoreSubValidation:"
+)
+
 func applyExtraValidations(schema *apiext.JSONSchemaProps, m protomodel.CoreDesc, t markers.TargetType) {
 	for _, line := range strings.Split(m.Location().GetLeadingComments(), "\n") {
 		line = strings.TrimSpace(line)
-		if !strings.Contains(line, "+kubebuilder:validation") && !strings.Contains(line, "+list") {
+		if !strings.Contains(line, KubeBuilderValidationPrefix) &&
+			!strings.Contains(line, "+list") &&
+			!strings.Contains(line, ProtocGenValidationPrefix) {
+			continue
+		}
+		schema := schema
+
+		// Custom logic to apply validations to map values. In go, they just make a type alias and apply policy there; proto cannot do that.
+		if strings.Contains(line, MapValidationPrefix) {
+			schema = schema.AdditionalProperties.Schema
+			line = strings.ReplaceAll(line, MapValidationPrefix, KubeBuilderValidationPrefix)
+		}
+		if strings.Contains(line, ListValidationPrefix) {
+			schema = schema.Items.Schema
+			line = strings.ReplaceAll(line, ListValidationPrefix, KubeBuilderValidationPrefix)
+		}
+		// This is a hack to allow a certain field to opt-out of the default "Duration must be non-zero"
+		if strings.Contains(line, DurationValidationPrefix+"none") {
+			schema.XValidations = nil
+			return
+		}
+		// Kubernetes is very particular about the format for XIntOrString, must match exactly this
+		if strings.Contains(line, IntOrStringValidation) {
+			schema.Format = ""
+			schema.Type = ""
+			schema.AnyOf = []apiext.JSONSchemaProps{
+				{Type: "integer"},
+				{Type: "string"},
+			}
+			line = strings.ReplaceAll(line, ProtocGenValidationPrefix+"validation:", KubeBuilderValidationPrefix)
+		}
+
+		if strings.Contains(line, IgnoreSubValidation) {
+			li := strings.TrimPrefix(line, IgnoreSubValidation)
+			items := []string{}
+			if err := json.Unmarshal([]byte(li), &items); err != nil {
+				log.Fatalf("invalid %v %v: %v", IgnoreSubValidation, line, err)
+			}
+			recursivelyStripValidation(schema, items)
 			continue
 		}
 
@@ -794,9 +916,46 @@ func applyExtraValidations(schema *apiext.JSONSchemaProps, m protomodel.CoreDesc
 			log.Fatalf("failed to parse: %v", line)
 		}
 		if err := a.(SchemaApplier).ApplyToSchema(schema); err != nil {
-			log.Fatalf("failed to apply schema: %v", err)
+			log.Fatalf("failed to apply schema %q: %v", schema.Description, err)
 		}
 	}
+}
+
+type stripVisitor struct {
+	removeMessages sets.Set[string]
+}
+
+func (s stripVisitor) Visit(schema *apiext.JSONSchemaProps) crd.SchemaVisitor {
+	if schema != nil && schema.XValidations != nil {
+		schema.XValidations = FilterInPlace(schema.XValidations, func(rule apiext.ValidationRule) bool {
+			return !s.removeMessages.Has(rule.Message)
+		})
+	}
+	return s
+}
+
+func recursivelyStripValidation(schema *apiext.JSONSchemaProps, items []string) {
+	crd.EditSchema(schema, stripVisitor{sets.New(items...)})
+}
+
+func FilterInPlace[E any](s []E, f func(E) bool) []E {
+	n := 0
+	for _, val := range s {
+		if f(val) {
+			s[n] = val
+			n++
+		}
+	}
+
+	// If those elements contain pointers you might consider zeroing those elements
+	// so that objects they reference can be garbage collected."
+	var empty E
+	for i := n; i < len(s); i++ {
+		s[i] = empty
+	}
+
+	s = s[:n]
+	return s
 }
 
 func (g *openapiGenerator) fieldName(field *protomodel.FieldDescriptor) string {
@@ -835,7 +994,8 @@ func validateStructural(s *apiext.JSONSchemaProps) error {
 	}
 
 	if errs := structuralschema.ValidateStructural(nil, r); len(errs) != 0 {
-		return fmt.Errorf("schema is not structural: %v", errs.ToAggregate().Error())
+		b, _ := yaml.Marshal(s)
+		return fmt.Errorf("schema is not structural: %v (%+v)", errs.ToAggregate().Error(), string(b))
 	}
 
 	return nil

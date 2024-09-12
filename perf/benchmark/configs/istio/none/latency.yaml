@@ -1,6 +1,6 @@
 # Data: latency
 # Config: No telemetry
-telemetry_mode: "none"
+telemetry_mode: "no_istio"
 conn:
     - 2
     - 4
@@ -13,11 +13,16 @@ qps:
 duration: 240
 size: 1024
 perf_record: false
-run_bothsidecar: true
+
+#if set to true in this file, should be set to false in configs/istio/telemetryv2_stats/latency.yaml and vice-versa. Or both are set to false.
+del_perf_record: false 
+
+#the same metric were generated either run_bothsidecar is set to false or true
+run_bothsidecar: false 
+
 run_serversidecar: false
 run_clientsidecar: false
-run_baseline: true
-
+run_no_istio: true
 extra_labels: "mtls"
-
-jitter: true
+uniform: true
+nocatchup: true

@@ -200,7 +200,6 @@ def sync_fortio(url, table, selector=None, promUrl="", csv=None, csv_output="", 
             out.write(json.dumps(gd) + "\n")
             stats.append(gd)
             cnt += 1
-
     out.close()
     print("Wrote {} json records to {}".format(cnt, datafile))
 
@@ -209,7 +208,6 @@ def sync_fortio(url, table, selector=None, promUrl="", csv=None, csv_output="", 
 
     if table:
         return write_table(table, datafile)
-
     return 0
 
 

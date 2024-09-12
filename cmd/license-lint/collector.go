@@ -179,9 +179,9 @@ func getDependentModules() ([]moduleDepInfo, error) {
 }
 
 // the set of license files we recognize
+// nolint: misspell
 var supportedLicenseFilenames = map[string]struct{}{
-	"LICENSE": {},
-	// nolint: misspell
+	"LICENSE":      {},
 	"LICENCE":      {},
 	"LICENSE.TXT":  {},
 	"LICENCE.TXT":  {},

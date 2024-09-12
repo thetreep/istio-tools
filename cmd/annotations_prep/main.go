@@ -30,6 +30,9 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/gomarkdown/markdown"
+	"github.com/gomarkdown/markdown/html"
+	"github.com/gomarkdown/markdown/parser"
 	"github.com/spf13/cobra"
 	"sigs.k8s.io/yaml"
 )
@@ -145,33 +148,35 @@ weight: 60
 This page presents the various resource <a href="{{ .Collection.ConceptLink }}">{{ .Collection.NameLowercasePlural }}</a> that
 Istio supports to control its behavior.
 </p>
-
+{{- range .Variables -}}
+{{- if not .Hidden }}
+<h2 id="{{ .GoName }}">{{ .Name }}</h2>
 <table class="annotations">
-  <thead>
-    <tr>
-      <th>{{ .Collection.Name }} Name</th>
-      <th>Feature Status</th>
-      <th>Resource Types</th>
-      <th>Description</th>
-    </tr>
-  </thead>
   <tbody>
-  {{- range .Variables -}}
-  {{- if not .Hidden }}
     <tr{{ if .Deprecated }} class="deprecated"{{ end }}>
+      <th>Name</th>
       <td><code>{{ .Name }}</code></td>
+    </tr>
+    <tr>
+      <th>Feature Status</th>
     {{- if .Deprecated }}
       <td>Deprecated</td>
     {{- else }}
       <td>{{ .FeatureStatus }}</td>
     {{- end }}
+    </tr>
+    <tr>
+      <th>Resource Types</th>
       <td>{{ .Resources }}</td>
+    </tr>
+    <tr>
+      <th>Description</th>
       <td>{{ processHTMLDescription .Description }}</td>
     </tr>
-  {{- end -}}
-  {{- end -}}
   </tbody>
 </table>
+{{- end -}}
+{{- end -}}
 `
 )
 
@@ -487,7 +492,9 @@ func generateFeatureStatus(v Variable) string {
 }
 
 func processHTMLDescription(in string) string {
-	return strings.ReplaceAll(in, "\n", "<br>")
+	// In most cases, the description is a single line in Markdown format.
+	// Convert it to HTML with a Markdown parser, this will give us a better looking output.
+	return string(mdToHTML([]byte(in)))
 }
 
 func processGoDescription(in string, indent int) string {
@@ -555,4 +562,18 @@ func lineWrap(in string) string {
 
 func add(x, y int) int {
 	return x + y
+}
+
+func mdToHTML(md []byte) []byte {
+	// create markdown parser with extensions
+	extensions := parser.CommonExtensions | parser.AutoHeadingIDs | parser.NoEmptyLineBeforeBlock
+	p := parser.NewWithExtensions(extensions)
+	doc := p.Parse(md)
+
+	// create HTML renderer with extensions
+	htmlFlags := html.CommonFlags | html.HrefTargetBlank
+	opts := html.RendererOptions{Flags: htmlFlags}
+	renderer := html.NewRenderer(opts)
+
+	return markdown.Render(doc, renderer)
 }
